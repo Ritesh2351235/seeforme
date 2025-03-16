@@ -283,19 +283,171 @@ const Dashboard = () => {
   };
 
   // Process user's question and image
+  // Process user's question and image
   const processUserQuery = async (query: string) => {
     if (!query) return;
+
+    // Normalized query for easier matching
+    const normalizedQuery = query.toLowerCase().trim();
+
+    // Enhanced vision queries including "holding" and other object-related phrases
+    const visionQueries = [
+      // Scene description queries
+      'what is in front of me',
+      'what do you see',
+      'what is this',
+      'describe this',
+      'what can you see',
+      'identify this',
+      'what is around',
+      'what is there',
+      'tell me what you see',
+      'describe the scene',
+      'what is happening',
+      'what is going on',
+
+      // Object identification queries
+      'what am i holding',
+      'what is in my hand',
+      'identify this object',
+      'what object is this',
+      'tell me about this object',
+      'what is this thing',
+      'what is this item',
+
+      // Reading text queries
+      'what does this say',
+      'read this',
+      'can you read this',
+      'what is written',
+      'what text do you see',
+
+      // Spatial awareness queries
+      'is there anything in front of me',
+      'is there a wall',
+      'am i about to hit something',
+      'is the path clear',
+      'is it safe to walk',
+
+      // Color and appearance queries
+      'what color is this',
+      'describe the color',
+      'how does this look',
+    ];
+
+    // Action words that typically involve vision
+    const visionVerbs = ['see', 'look', 'watch', 'observe', 'check', 'scan', 'view', 'read', 'identify', 'describe'];
+
+    // Object words that typically involve vision when combined with "what is this"
+    const objectWords = ['thing', 'object', 'item', 'device', 'product', 'box', 'container', 'bottle', 'package'];
+
+    // Positional words that typically involve vision
+    const positionalWords = ['holding', 'hand', 'front', 'ahead', 'near', 'next to', 'beside', 'behind'];
+
+    // More sophisticated vision query detection
+    const needsImageProcessing =
+      // Direct matches with predefined queries
+      visionQueries.some(q => normalizedQuery.includes(q)) ||
+
+      // Contains vision verbs
+      visionVerbs.some(verb => normalizedQuery.includes(verb)) ||
+
+      // Contains positional indicators with question words
+      (positionalWords.some(word => normalizedQuery.includes(word)) &&
+        (normalizedQuery.includes('what') || normalizedQuery.includes('how') || normalizedQuery.includes('where'))) ||
+
+      // "What is this" combined with object words
+      (normalizedQuery.includes('what is this') && objectWords.some(word => normalizedQuery.includes(word))) ||
+
+      // Direct questions about visibility
+      normalizedQuery.includes('can you see') ||
+
+      // Questions about appearance
+      normalizedQuery.includes('how does it look') ||
+
+      // Direct requests for visual help
+      normalizedQuery.includes('help me see') ||
+      normalizedQuery.includes('tell me what you see');
 
     setIsProcessing(true);
 
     try {
-      // Directly process the query without checking for specific keywords
-      const response = await refineResponseWithGemini("", query);
-      addMessage(response, false);
-      speak(response);
+      if (needsImageProcessing) {
+        // Capture image from camera
+        let imageBase64 = null;
+        let retryCount = 0;
+
+        // Try up to 3 times to capture a valid image
+        while (retryCount < 3 && !imageBase64) {
+          imageBase64 = await captureImage();
+          if (!imageBase64) {
+            console.log(`Image capture failed, retry ${retryCount + 1}/3`);
+            retryCount++;
+            // Wait briefly before retrying
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+        }
+
+        if (imageBase64) {
+          // Determine the specific type of visual query for better context
+          let contextualizedQuery = query;
+
+          // Add contextual hints for specific types of queries
+          if (normalizedQuery.includes('holding') || normalizedQuery.includes('hand')) {
+            contextualizedQuery = `${query} (Focus on objects being held in hands)`;
+          } else if (normalizedQuery.includes('read') || normalizedQuery.includes('say') || normalizedQuery.includes('text')) {
+            contextualizedQuery = `${query} (Focus on reading any visible text)`;
+          } else if (normalizedQuery.includes('color')) {
+            contextualizedQuery = `${query} (Focus on colors and visual appearance)`;
+          } else if (positionalWords.some(word => normalizedQuery.includes(word))) {
+            contextualizedQuery = `${query} (Focus on spatial relationships and positions)`;
+          }
+
+          // Process image with LLaVA
+          const imageAnalysisResult = await processImageWithLLaVA(imageBase64, contextualizedQuery);
+
+          // Refine response with Gemini
+          const refinedResponse = await refineResponseWithGemini(imageAnalysisResult, query);
+
+          addMessage(refinedResponse, false);
+          speak(refinedResponse);
+        } else {
+          const message = "I couldn't capture a clear image. Please make sure there's enough light and try again.";
+          addMessage(message, false);
+          speak(message);
+        }
+      } else {
+        // Categorize non-vision queries to provide better responses
+        let queryType = "general";
+
+        if (normalizedQuery.includes('who are you') || normalizedQuery.includes('what can you do')) {
+          queryType = "assistant_info";
+        } else if (normalizedQuery.includes('help') || normalizedQuery.includes('how to use')) {
+          queryType = "usage_help";
+        } else if (normalizedQuery.includes('thank') || normalizedQuery.includes('thanks')) {
+          queryType = "gratitude";
+        } else if (normalizedQuery.includes('hello') || normalizedQuery.includes('hi ') || normalizedQuery === 'hi') {
+          queryType = "greeting";
+        }
+        // For non-vision queries, add context about query type
+        const response = await refineResponseWithGemini(query, queryType);
+        addMessage(response, false);
+        speak(response);
+      }
     } catch (error) {
       console.error('Error processing query:', error);
-      const errorMessage = "I'm sorry, I couldn't process your request. Please try again.";
+
+      // More specific error messages based on where the error occurred
+      let errorMessage = "I'm sorry, I couldn't process your request. Please try again.";
+
+      if (error.message?.includes('image')) {
+        errorMessage = "I had trouble processing the image. Could you try again with better lighting?";
+      } else if (error.message?.includes('network')) {
+        errorMessage = "I'm having trouble connecting to the network. Please check your connection and try again.";
+      } else if (error.message?.includes('timeout')) {
+        errorMessage = "The request took too long to process. Please try again.";
+      }
+
       addMessage(errorMessage, false);
       speak(errorMessage);
     } finally {
@@ -343,7 +495,7 @@ const Dashboard = () => {
   };
 
   // Refine the response using Gemini
-  const refineResponseWithGemini = async (llavaResponse: string, originalQuery: string): Promise<string> => {
+  const refineResponseWithGemini = async (llavaResponse: string, originalQuery: string, queryType: string = "general"): Promise<string> => {
     try {
       // Call the API route using fetch
       const response = await fetch('https://seeforme.riteshh.workers.dev/refine', {
@@ -353,8 +505,11 @@ const Dashboard = () => {
         },
         body: JSON.stringify({
           llavaResponse,
-          originalQuery
+          originalQuery,
+          queryType
         }),
+        // Add timeout to prevent hanging requests
+        signal: AbortSignal.timeout(8000)
       });
 
       if (!response.ok) {
@@ -362,7 +517,7 @@ const Dashboard = () => {
       }
 
       const data = await response.json();
-      return data.result;
+      return data.result || "I'm not sure how to respond to that. Could you try asking in a different way?";
     } catch (error) {
       console.error('Gemini processing error:', error);
       return llavaResponse || "I'm not sure how to respond to that. Could you try asking in a different way?";
